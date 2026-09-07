@@ -73,66 +73,91 @@ describe('averageFps', () => {
 describe('recommendTier', () => {
   const opts = DEFAULT_ADAPTIVE_OPTIONS;
 
-  it('ticks the cooldown down and holds the tier while cooling', () => {
-    const r = recommendTier('high', 10 /* very low fps */, 5, opts);
+  it('drains the cooldown by the elapsed time and holds the tier while cooling', () => {
+    // 1000 ms of cooldown left, 300 ms elapsed since the last decision → 700 ms.
+    const r = recommendTier('high', 10 /* very low fps */, 1000, 300, opts);
     expect(r.tier).toBe('high');
-    expect(r.cooldown).toBe(4);
+    expect(r.cooldown).toBe(700);
     expect(r.changed).toBe(false);
   });
 
+  it('never drains the cooldown below zero', () => {
+    // Elapsed exceeds the remaining cooldown — clamp, do not go negative.
+    const r = recommendTier('high', 10, 200, 5000, opts);
+    expect(r.cooldown).toBe(0);
+    expect(r.changed).toBe(false);
+  });
+
+  it('expires the cooldown in ~1.5 s of real time regardless of window size', () => {
+    // A change arms opts.cooldownMs (1500). Draining it by a 600 ms window each
+    // call clears it after 3 windows (~1.8 s), i.e. wall-clock time — NOT ~90
+    // windows. This is the regression the fix targets.
+    let cd = opts.cooldownMs;
+    expect(cd).toBe(1500);
+    cd = recommendTier('high', 10, cd, 600, opts).cooldown; // 900
+    cd = recommendTier('high', 10, cd, 600, opts).cooldown; // 300
+    cd = recommendTier('high', 10, cd, 600, opts).cooldown; // 0
+    expect(cd).toBe(0);
+    // Now cleared, the next decision is allowed to act again.
+    expect(recommendTier('high', 10, cd, 600, opts).changed).toBe(true);
+  });
+
   it('downgrades one step below the downgrade threshold', () => {
-    const r = recommendTier('high', 30, 0, opts);
+    const r = recommendTier('high', 30, 0, 16, opts);
     expect(r.tier).toBe('medium');
     expect(r.changed).toBe(true);
-    expect(r.cooldown).toBe(opts.cooldownFrames);
+    expect(r.cooldown).toBe(opts.cooldownMs);
   });
 
   it('upgrades one step above the upgrade threshold', () => {
-    const r = recommendTier('low', 60, 0, opts);
+    const r = recommendTier('low', 60, 0, 16, opts);
     expect(r.tier).toBe('medium');
     expect(r.changed).toBe(true);
-    expect(r.cooldown).toBe(opts.cooldownFrames);
+    expect(r.cooldown).toBe(opts.cooldownMs);
   });
 
   it('moves only one tier per decision', () => {
     // Even at a crawl, high does not jump straight to low.
-    expect(recommendTier('high', 5, 0, opts).tier).toBe('medium');
+    expect(recommendTier('high', 5, 0, 16, opts).tier).toBe('medium');
     // Even blazing fast, low does not jump straight to high.
-    expect(recommendTier('low', 240, 0, opts).tier).toBe('medium');
+    expect(recommendTier('low', 240, 0, 16, opts).tier).toBe('medium');
   });
 
   it('does nothing inside the hysteresis dead zone', () => {
     // 50 fps sits between downgradeFps (45) and upgradeFps (57).
-    const r = recommendTier('medium', 50, 0, opts);
+    const r = recommendTier('medium', 50, 0, 16, opts);
     expect(r.tier).toBe('medium');
     expect(r.changed).toBe(false);
     expect(r.cooldown).toBe(0);
   });
 
   it('will not downgrade below low or upgrade above high', () => {
-    const down = recommendTier('low', 1, 0, opts);
+    const down = recommendTier('low', 1, 0, 16, opts);
     expect(down.tier).toBe('low');
     expect(down.changed).toBe(false);
 
-    const up = recommendTier('high', 120, 0, opts);
+    const up = recommendTier('high', 120, 0, 16, opts);
     expect(up.tier).toBe('high');
     expect(up.changed).toBe(false);
   });
 
   it('ignores a not-yet-measured (zero / NaN) average', () => {
-    expect(recommendTier('medium', 0, 0, opts).changed).toBe(false);
-    expect(recommendTier('medium', Number.NaN, 0, opts).changed).toBe(false);
+    expect(recommendTier('medium', 0, 0, 16, opts).changed).toBe(false);
+    expect(recommendTier('medium', Number.NaN, 0, 16, opts).changed).toBe(false);
   });
 
   it('does not oscillate: a downgrade lands inside the new tier’s stable band', () => {
     // A device pinned at ~40 fps: downgrade high→medium, then (once cooled) the
     // same 40 fps would push medium→low, but never back up, because 40 < 57.
+    // Each iteration models a ~600 ms window, so the 1500 ms cooldown clears
+    // after a few windows.
     let tier: typeof TIER_ORDER[number] = 'high';
     let cooldown = 0;
     const measured = 40;
+    const windowMs = 600;
     const seen: string[] = [];
-    for (let frame = 0; frame < 400; frame++) {
-      const r = recommendTier(tier, measured, cooldown, opts);
+    for (let win = 0; win < 400; win++) {
+      const r = recommendTier(tier, measured, cooldown, windowMs, opts);
       tier = r.tier;
       cooldown = r.cooldown;
       if (r.changed) seen.push(r.tier);
@@ -143,9 +168,9 @@ describe('recommendTier', () => {
   });
 
   it('honours custom thresholds', () => {
-    const strict: AdaptiveQualityOptions = { downgradeFps: 58, upgradeFps: 59, cooldownFrames: 10 };
-    expect(recommendTier('high', 57, 0, strict).tier).toBe('medium');
-    expect(recommendTier('medium', 59, 0, strict).tier).toBe('high');
+    const strict: AdaptiveQualityOptions = { downgradeFps: 58, upgradeFps: 59, cooldownMs: 10 };
+    expect(recommendTier('high', 57, 0, 16, strict).tier).toBe('medium');
+    expect(recommendTier('medium', 59, 0, 16, strict).tier).toBe('high');
   });
 });
 
