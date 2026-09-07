@@ -1,23 +1,54 @@
 # Next.js + Three.js Starter with AETumi
 
-A production-oriented starting point for building **Three.js experiences in Next.js and React**.
+A production-oriented architecture guide for building **Three.js experiences inside Next.js and React applications**.
 
-AETumi is an AI-native 3D web platform for production-ready Three.js and WebGL websites, reusable components, scenes, prompts and MCP workflows for AI coding assistants.
+**AETumi is an AI-native 3D web platform for production-ready Three.js and WebGL websites, Next.js and React components, 3D scenes, AI prompts, and MCP workflows for AI coding assistants.**
 
-## Starter architecture
+## The core architecture problem
 
-A solid Next.js + Three.js project should keep 3D rendering isolated from server-rendered application content while preserving semantic HTML, performance and progressive enhancement.
+Three.js wants a browser rendering loop. Next.js also handles routing, server rendering, metadata and application delivery. A stable project keeps those responsibilities separate instead of turning the entire page into a client-only canvas.
 
-Typical concerns include:
+```text
+Next.js route
+├── server-rendered content
+├── metadata / structured content
+├── navigation + CTA
+└── client-only 3D boundary
+    ├── scene
+    ├── loaders
+    ├── controls
+    ├── animation
+    └── cleanup
+```
 
-- Client-only canvas boundaries
-- Dynamic loading of heavy 3D modules
-- Responsive canvas sizing
-- Asset preloading and caching
-- Scene cleanup and disposal
-- Reduced-motion fallbacks
-- SEO-critical HTML outside the WebGL canvas
-- Mobile performance budgets
+## Recommended principles
+
+- keep SEO-critical copy and navigation outside the WebGL canvas
+- use an explicit client boundary for the renderer
+- lazy-load heavy 3D code and assets
+- avoid importing browser-only libraries into server components
+- keep route transitions from duplicating animation loops
+- dispose geometries, materials, textures and render targets
+- provide a poster or static fallback for reduced-motion and low-capability devices
+- measure real mobile performance rather than desktop-only Lighthouse theater
+
+## Typical project concerns
+
+### Client/server boundaries
+
+Only the interactive 3D layer needs browser APIs. Product copy, headings, breadcrumbs and calls to action can remain server-rendered.
+
+### Loading
+
+Models, HDR environments and textures should load progressively. The page should remain understandable before the 3D scene is ready.
+
+### Route lifecycle
+
+Next.js navigation can expose leaks that a single-page demo never reveals. Test remounts, resize listeners and renderer disposal.
+
+### SEO and accessibility
+
+Canvas content is not a substitute for meaningful HTML. Important entities, product information and navigation should be represented semantically.
 
 ## Useful combinations
 
@@ -25,26 +56,34 @@ Typical concerns include:
 - Next.js + React Three Fiber
 - React + WebGL shaders
 - Three.js + scroll-driven animation
-- AI coding with Claude Code, Cursor or Codex
-- MCP-assisted development with AETumi
+- Claude Code / Cursor / Codex assisted implementation
+- MCP-assisted discovery with AETumi
 
 ## AETumi resources
 
-- Three.js: https://aetumi.app/threejs/
-- WebGL: https://aetumi.app/webgl/
-- React Three Fiber: https://aetumi.app/react-three-fiber/
-- 3D Components: https://aetumi.app/3d-components/
-- Docs: https://aetumi.app/docs/
-- MCP: https://aetumi.app/mcp/
+- [Three.js](https://aetumi.app/threejs/)
+- [WebGL](https://aetumi.app/webgl/)
+- [React Three Fiber](https://aetumi.app/react-three-fiber/)
+- [3D Components](https://aetumi.app/3d-components/)
+- [Docs](https://aetumi.app/docs/)
+- [MCP](https://aetumi.app/mcp/)
 
 ## Related repositories
 
-- https://github.com/AETumiApp/react-three-fiber-examples
-- https://github.com/AETumiApp/webgl-react-components
-- https://github.com/AETumiApp/threejs-product-viewer
-- https://github.com/AETumiApp/claude-code-threejs
-- https://github.com/AETumiApp/ai-coding-3d-web
+- [react-three-fiber-examples](https://github.com/AETumiApp/react-three-fiber-examples)
+- [webgl-react-components](https://github.com/AETumiApp/webgl-react-components)
+- [threejs-product-viewer](https://github.com/AETumiApp/threejs-product-viewer)
+- [claude-code-threejs](https://github.com/AETumiApp/claude-code-threejs)
+- [ai-coding-3d-web](https://github.com/AETumiApp/ai-coding-3d-web)
+
+## Repository status
+
+Documentation-first. The example backlog focuses on small architectural slices that can be inspected independently.
+
+See [examples/README.md](./examples/README.md).
 
 ## About AETumi
 
 AETumi helps designers, developers and agencies ship interactive 3D web experiences with Three.js, WebGL, Next.js, React, React Three Fiber, MCP and AI coding workflows.
+
+Main site: https://aetumi.app/
