@@ -1,84 +1,173 @@
 'use client';
 
 /**
- * Scene.tsx — a self-contained Three.js r160 scene as a React 18 client component.
+ * Scene.tsx — a production-grade Three.js r160 scene as a React 18 client island.
  *
- * Design notes:
- *  - This file is a *client* component ('use client'). It touches the DOM, the
- *    WebGL context and requestAnimationFrame, none of which exist while the page
- *    is server-rendered. Keep all of that here, never in a server component.
- *  - It is meant to be loaded with `next/dynamic(..., { ssr: false })` from a
- *    server component (see ../page.tsx) so the HTML shell ships first and the
- *    3D bundle is fetched only in the browser.
- *  - Cleanup is exhaustive: we cancel the animation frame, remove listeners,
- *    dispose geometries/materials and the renderer, and drop the canvas. This is
- *    what keeps hot-reload, route changes and StrictMode double-mounts leak-free.
+ * What "production-grade" means here:
+ *  - **Capability detection first.** WebGL2 → WebGL → give up (call `onUnsupported`
+ *    and render nothing so the server-rendered poster shows through).
+ *  - **Adaptive quality.** A rolling FPS window drives the pixel-ratio cap up and
+ *    down with hysteresis (see ../../lib/adaptiveQuality). A weak GPU quietly
+ *    settles at a lower resolution instead of dropping frames.
+ *  - **Never renders when it can't be seen.** An IntersectionObserver pauses the
+ *    loop when the canvas scrolls off-screen and `visibilitychange` pauses it when
+ *    the tab is hidden — no wasted battery, no background GPU churn.
+ *  - **Respects `prefers-reduced-motion`.** Renders exactly one frame, no loop.
+ *  - **Exhaustive, StrictMode-safe teardown.** The async import is guarded by a
+ *    `disposed` flag so React 18's double-invoked dev effect can't double-init or
+ *    leak a WebGL context; geometries, materials, environment, PMREM and the
+ *    renderer are all disposed and the canvas removed.
+ *
+ * Mount it via `next/dynamic(() => import('./scene/Scene'), { ssr: false })` from a
+ * Server Component so Three.js never touches the server bundle. See ../page.tsx.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type CSSProperties } from 'react';
+import type * as THREE from 'three';
+import {
+  DEFAULT_ADAPTIVE_OPTIONS,
+  createFrameWindow,
+  recommendTier,
+  tierSettings,
+  type AdaptiveQualityOptions,
+  type QualityTier,
+} from '../../lib/adaptiveQuality';
 
-export default function Scene() {
+export interface SceneProps {
+  /** Class applied to the container element. */
+  className?: string;
+  /** Inline styles merged onto the container (defaults to fill-parent block). */
+  style?: CSSProperties;
+  /** Quality tier to start at before the first FPS window settles. */
+  initialTier?: QualityTier;
+  /** Override any of the adaptive-quality thresholds. */
+  qualityOptions?: Partial<AdaptiveQualityOptions>;
+  /**
+   * Called once if WebGL is unavailable (blocked, headless, ancient GPU) or the
+   * context is lost. Use it to keep a poster/fallback visible in the parent.
+   */
+  onUnsupported?: () => void;
+}
+
+/** Detect the best available WebGL context without leaking the probe canvas. */
+function detectRenderMode(): 'webgl2' | 'webgl' | null {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  try {
+    if (canvas.getContext('webgl2')) return 'webgl2';
+    if (
+      canvas.getContext('webgl') ||
+      canvas.getContext('experimental-webgl' as 'webgl')
+    ) {
+      return 'webgl';
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export default function Scene({
+  className,
+  style,
+  initialTier = 'high',
+  qualityOptions,
+  onUnsupported,
+}: SceneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Keep the latest onUnsupported without re-running the heavy effect.
+  const onUnsupportedRef = useRef(onUnsupported);
+  onUnsupportedRef.current = onUnsupported;
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    // Respect users who asked the OS to reduce motion.
+    const options: AdaptiveQualityOptions = { ...DEFAULT_ADAPTIVE_OPTIONS, ...qualityOptions };
+
+    const mode = detectRenderMode();
+    if (mode === null) {
+      onUnsupportedRef.current?.();
+      return;
+    }
+
     const prefersReducedMotion = window.matchMedia(
-      '(prefers-reduced-motion: reduce)'
+      '(prefers-reduced-motion: reduce)',
     ).matches;
 
-    // Local, mutable handles so the async import and the cleanup function can
-    // both see the same objects.
-    let renderer: import('three').WebGLRenderer | undefined;
-    let animationId = 0;
+    // Mutable handles shared between the async import and the cleanup closure.
     let disposed = false;
-    let onResize: (() => void) | undefined;
+    let renderer: THREE.WebGLRenderer | undefined;
     let cleanupInner: (() => void) | undefined;
 
-    // Dynamic import keeps `three` out of the server bundle and lets Next split
-    // it into its own chunk that only downloads in the browser.
-    import('three')
-      .then((THREE) => {
+    // Guard against a stray canvas left by a previous (StrictMode) mount.
+    container.replaceChildren();
+
+    // Load three (and the RoomEnvironment addon) only in the browser; this is
+    // what code-splits them out of the server bundle.
+    void Promise.all([
+      import('three'),
+      import('three/addons/environments/RoomEnvironment.js'),
+    ])
+      .then(([THREE_NS, { RoomEnvironment }]) => {
         if (disposed || !container) return;
+
+        let tier: QualityTier = initialTier;
 
         const width = container.clientWidth || window.innerWidth;
         const height = container.clientHeight || window.innerHeight;
 
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color('#0b0d12');
+        const scene = new THREE_NS.Scene();
+        scene.background = new THREE_NS.Color('#0b0d12');
 
-        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+        const camera = new THREE_NS.PerspectiveCamera(45, width / height, 0.1, 100);
         camera.position.set(0, 0, 5);
 
-        renderer = new THREE.WebGLRenderer({
-          antialias: true,
+        renderer = new THREE_NS.WebGLRenderer({
+          antialias: tierSettings(tier).antialias,
           alpha: false,
           powerPreference: 'high-performance',
         });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.outputColorSpace = THREE_NS.SRGBColorSpace;
+        renderer.toneMapping = THREE_NS.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+
+        const applyPixelRatio = () => {
+          const cap = tierSettings(tier).maxPixelRatio;
+          renderer!.setPixelRatio(Math.min(window.devicePixelRatio || 1, cap));
+        };
+        applyPixelRatio();
         renderer.setSize(width, height);
-        renderer.outputColorSpace = THREE.SRGBColorSpace;
         container.appendChild(renderer.domElement);
 
-        // A single lit mesh — the "hello world" of a real scene.
-        const geometry = new THREE.IcosahedronGeometry(1.3, 0);
-        const material = new THREE.MeshStandardMaterial({
+        // Image-based lighting from a procedural room — gives the metal its
+        // reflections without shipping an HDR file.
+        const pmrem = new THREE_NS.PMREMGenerator(renderer);
+        const envScene = new RoomEnvironment();
+        const envRT = pmrem.fromScene(envScene, 0.04);
+        scene.environment = envRT.texture;
+
+        const geometry = new THREE_NS.IcosahedronGeometry(1.3, 0);
+        const material = new THREE_NS.MeshStandardMaterial({
           color: '#6ea8ff',
-          roughness: 0.25,
-          metalness: 0.1,
+          roughness: 0.18,
+          metalness: 0.9,
           flatShading: true,
+          envMapIntensity: 1.0,
         });
-        const mesh = new THREE.Mesh(geometry, material);
+        const mesh = new THREE_NS.Mesh(geometry, material);
         scene.add(mesh);
 
-        const keyLight = new THREE.DirectionalLight('#ffffff', 2.2);
+        const keyLight = new THREE_NS.DirectionalLight('#ffffff', 2.0);
         keyLight.position.set(3, 4, 5);
         scene.add(keyLight);
-        scene.add(new THREE.AmbientLight('#2a3a55', 1.4));
+        scene.add(new THREE_NS.AmbientLight('#2a3a55', 0.6));
 
-        const clock = new THREE.Clock();
+        const clock = new THREE_NS.Clock();
+        const frames = createFrameWindow(40);
+        let cooldown = 0;
+        let lastTs = (typeof performance !== 'undefined' ? performance : Date).now();
 
         const renderFrame = () => {
           const t = clock.getElapsedTime();
@@ -87,40 +176,113 @@ export default function Scene() {
           renderer!.render(scene, camera);
         };
 
-        const animate = () => {
-          animationId = requestAnimationFrame(animate);
+        // The per-frame callback for setAnimationLoop. It both draws and feeds
+        // the adaptive-quality controller.
+        const loop = () => {
+          const now = (typeof performance !== 'undefined' ? performance : Date).now();
+          const dt = now - lastTs;
+          lastTs = now;
+
+          if (frames.push(dt)) {
+            const rec = recommendTier(tier, frames.fps(), cooldown, options);
+            cooldown = rec.cooldown;
+            if (rec.changed) {
+              tier = rec.tier;
+              applyPixelRatio(); // AA is fixed at construction; DPR is what we adapt live.
+            }
+            frames.reset();
+          }
+
           renderFrame();
         };
 
-        onResize = () => {
-          if (!container || !renderer) return;
+        // ----- run / pause plumbing -------------------------------------------
+        let running = false;
+        let onScreen = true;
+        let pageVisible = typeof document === 'undefined' ? true : !document.hidden;
+
+        const start = () => {
+          if (running || !renderer) return;
+          running = true;
+          lastTs = (typeof performance !== 'undefined' ? performance : Date).now();
+          renderer.setAnimationLoop(loop);
+        };
+        const stop = () => {
+          if (!running || !renderer) return;
+          running = false;
+          renderer.setAnimationLoop(null);
+        };
+        const syncRunState = () => {
+          if (onScreen && pageVisible) start();
+          else stop();
+        };
+
+        const onResize = () => {
+          if (!renderer || !container) return;
           const w = container.clientWidth || window.innerWidth;
           const h = container.clientHeight || window.innerHeight;
           camera.aspect = w / h;
           camera.updateProjectionMatrix();
           renderer.setSize(w, h);
-          renderFrame();
+          renderFrame(); // repaint immediately even while paused
         };
         window.addEventListener('resize', onResize);
 
+        const onVisibility = () => {
+          pageVisible = !document.hidden;
+          syncRunState();
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+
+        const observer = new IntersectionObserver(
+          (entries) => {
+            onScreen = entries.some((e) => e.isIntersecting);
+            syncRunState();
+          },
+          { threshold: 0 },
+        );
+        observer.observe(container);
+
+        // Context loss: stop cleanly and let the parent restore its poster.
+        const onContextLost = (event: Event) => {
+          event.preventDefault();
+          stop();
+          onUnsupportedRef.current?.();
+        };
+        renderer.domElement.addEventListener('webglcontextlost', onContextLost);
+
         if (prefersReducedMotion) {
-          // Draw one static frame instead of animating.
-          renderFrame();
+          applyPixelRatio();
+          renderFrame(); // a single, still frame — never start the loop
         } else {
-          animate();
+          syncRunState();
         }
 
         cleanupInner = () => {
-          if (animationId) cancelAnimationFrame(animationId);
-          if (onResize) window.removeEventListener('resize', onResize);
+          stop();
+          observer.disconnect();
+          window.removeEventListener('resize', onResize);
+          document.removeEventListener('visibilitychange', onVisibility);
+          renderer?.domElement.removeEventListener('webglcontextlost', onContextLost);
+
           geometry.dispose();
           material.dispose();
+          envRT.texture.dispose();
+          pmrem.dispose();
+          // RoomEnvironment builds a throwaway scene of meshes; free them too.
+          envScene.traverse((obj) => {
+            const m = obj as THREE.Mesh;
+            m.geometry?.dispose?.();
+            const mat = m.material;
+            if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+            else mat?.dispose?.();
+          });
         };
       })
-      .catch((err) => {
-        // WebGL can be unavailable (blocked, headless, old GPU). Fail quietly —
-        // the poster fallback from page.tsx stays visible underneath.
+      .catch((err: unknown) => {
+        // Import or init failed → keep the poster; surface to the parent.
         console.error('Failed to initialise Three.js scene:', err);
+        onUnsupportedRef.current?.();
       });
 
     return () => {
@@ -129,15 +291,20 @@ export default function Scene() {
       if (renderer) {
         renderer.dispose();
         renderer.domElement.remove();
+        renderer = undefined;
       }
     };
+    // Effect intentionally runs once per mount; props are captured above and the
+    // callback is read through a ref so changing it never forces a WebGL re-init.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
     <div
       ref={containerRef}
       aria-hidden="true"
-      style={{ width: '100%', height: '100%', display: 'block' }}
+      className={className}
+      style={{ width: '100%', height: '100%', display: 'block', ...style }}
     />
   );
 }
