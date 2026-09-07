@@ -15,7 +15,11 @@
  *     The band between them is a dead zone where nothing changes, so a device
  *     hovering near a threshold does not flip tiers every window.
  *  2. **Cooldown.** After any change the controller ignores further changes for
- *     `cooldownFrames`, giving the GPU time to settle before we judge it again.
+ *     `cooldownMs` of real time, giving the GPU time to settle before we judge it
+ *     again. The cooldown is time-based (milliseconds), not frame- or
+ *     window-based, so it lasts the same wall-clock duration however often the
+ *     caller samples — the caller threads the remaining cooldown back in together
+ *     with the elapsed time since the previous decision.
  */
 
 /** Render-quality tiers, ordered from cheapest to richest. */
@@ -30,19 +34,21 @@ export interface AdaptiveQualityOptions {
   readonly downgradeFps: number;
   /** Average FPS at or above which we step up a tier. */
   readonly upgradeFps: number;
-  /** Frames to wait after a change before another change is allowed. */
-  readonly cooldownFrames: number;
+  /** Milliseconds of real time to wait after a change before another is allowed. */
+  readonly cooldownMs: number;
 }
 
 /**
  * Sensible defaults for a 60 Hz target. The 45–57 dead zone keeps a device that
- * settles in the low-50s from oscillating, and ~90 frames (~1.5 s) of cooldown
- * absorbs transient spikes such as a texture upload or a GC pause.
+ * settles in the low-50s from oscillating, and ~1.5 s of cooldown absorbs
+ * transient spikes such as a texture upload or a GC pause. Because the cooldown
+ * is wall-clock time (not a frame count), it lasts ~1.5 s whether the caller
+ * decides every frame or once per multi-frame window.
  */
 export const DEFAULT_ADAPTIVE_OPTIONS: AdaptiveQualityOptions = {
   downgradeFps: 45,
   upgradeFps: 57,
-  cooldownFrames: 90,
+  cooldownMs: 1500,
 };
 
 /** Concrete renderer settings a tier maps to. */
@@ -106,7 +112,7 @@ export function averageFps(frameDurationsMs: readonly number[]): number {
 export interface TierRecommendation {
   /** The tier to use for upcoming frames. */
   readonly tier: QualityTier;
-  /** Remaining cooldown frames before another change is permitted. */
+  /** Remaining cooldown, in milliseconds, before another change is permitted. */
   readonly cooldown: number;
   /** True when this call moved to a different tier. */
   readonly changed: boolean;
@@ -121,18 +127,24 @@ export interface TierRecommendation {
  *
  * @param currentTier the tier currently in effect
  * @param averageFps  mean FPS over the most recent window (see {@link averageFps})
- * @param cooldown    frames remaining before a change is allowed
+ * @param cooldown    milliseconds of cooldown remaining before a change is allowed
+ * @param elapsedMs   real time elapsed since the previous decision, in ms; the
+ *                    cooldown is drained by this, so passing the true frame/window
+ *                    duration makes the cooldown last a fixed wall-clock time
  * @param opts        thresholds; defaults to {@link DEFAULT_ADAPTIVE_OPTIONS}
  */
 export function recommendTier(
   currentTier: QualityTier,
   averageFps: number,
   cooldown: number,
+  elapsedMs: number,
   opts: AdaptiveQualityOptions = DEFAULT_ADAPTIVE_OPTIONS,
 ): TierRecommendation {
-  // Still cooling down from a previous change: hold, and tick the timer down.
+  // Still cooling down from a previous change: hold, and drain the timer by the
+  // real time elapsed since the last decision (never below zero).
   if (cooldown > 0) {
-    return { tier: currentTier, cooldown: cooldown - 1, changed: false };
+    const drain = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs : 0;
+    return { tier: currentTier, cooldown: Math.max(0, cooldown - drain), changed: false };
   }
 
   // Guard against a not-yet-measured or degenerate sample.
@@ -146,7 +158,7 @@ export function recommendTier(
   if (averageFps <= opts.downgradeFps && index > 0) {
     return {
       tier: clampTier(index - 1),
-      cooldown: opts.cooldownFrames,
+      cooldown: opts.cooldownMs,
       changed: true,
     };
   }
@@ -155,7 +167,7 @@ export function recommendTier(
   if (averageFps >= opts.upgradeFps && index < TIER_ORDER.length - 1) {
     return {
       tier: clampTier(index + 1),
-      cooldown: opts.cooldownFrames,
+      cooldown: opts.cooldownMs,
       changed: true,
     };
   }
