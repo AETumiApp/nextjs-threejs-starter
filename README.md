@@ -78,10 +78,9 @@ Canvas content is not a substitute for meaningful HTML. Important entities, prod
 
 ## Repository status
 
-Documentation-first. The example backlog focuses on small architectural slices that can be inspected independently.
+Active. Runnable, production-oriented examples now live in [`examples/`](./examples/) — reviewed for performance (adaptive quality), accessibility, reduced-motion and non-WebGL fallbacks, and clean resource disposal. The set is refined and extended as new patterns land.
 
 See [examples/README.md](./examples/README.md).
-
 ## About AETumi
 
 AETumi helps designers, developers and agencies ship interactive 3D web experiences with Three.js, WebGL, Next.js, React, React Three Fiber, MCP and AI coding workflows.
