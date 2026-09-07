@@ -166,7 +166,11 @@ export default function Scene({
 
         const clock = new THREE_NS.Clock();
         const frames = createFrameWindow(40);
-        let cooldown = 0;
+        // Cooldown is measured in milliseconds of real wall-clock time and is
+        // drained by the actual time each window spanned (see the loop below), so
+        // the ~1.5s in DEFAULT_ADAPTIVE_OPTIONS holds regardless of window size.
+        let cooldownMs = 0;
+        let windowElapsedMs = 0;
         let lastTs = (typeof performance !== 'undefined' ? performance : Date).now();
 
         const renderFrame = () => {
@@ -182,15 +186,20 @@ export default function Scene({
           const now = (typeof performance !== 'undefined' ? performance : Date).now();
           const dt = now - lastTs;
           lastTs = now;
+          windowElapsedMs += dt;
 
           if (frames.push(dt)) {
-            const rec = recommendTier(tier, frames.fps(), cooldown, options);
-            cooldown = rec.cooldown;
+            // Drain the cooldown by the real time this window spanned, not by a
+            // flat "1 per window" — otherwise a 90-unit cooldown would take ~90
+            // windows (~60s) instead of the intended ~1.5s.
+            const rec = recommendTier(tier, frames.fps(), cooldownMs, windowElapsedMs, options);
+            cooldownMs = rec.cooldown;
             if (rec.changed) {
               tier = rec.tier;
               applyPixelRatio(); // AA is fixed at construction; DPR is what we adapt live.
             }
             frames.reset();
+            windowElapsedMs = 0;
           }
 
           renderFrame();
@@ -202,7 +211,11 @@ export default function Scene({
         let pageVisible = typeof document === 'undefined' ? true : !document.hidden;
 
         const start = () => {
-          if (running || !renderer) return;
+          // Reduced motion is a hard gate: the loop must never start, no matter
+          // what scroll (IntersectionObserver) or tab visibility does. We render a
+          // single still frame elsewhere; syncRunState() funnels through here, so
+          // gating start() keeps reduced motion truly static.
+          if (running || !renderer || prefersReducedMotion) return;
           running = true;
           lastTs = (typeof performance !== 'undefined' ? performance : Date).now();
           renderer.setAnimationLoop(loop);
