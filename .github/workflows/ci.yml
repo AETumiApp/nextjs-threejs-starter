@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Typecheck & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Use a clean, reproducible install from the lockfile.
+      - name: Install dependencies
+        run: npm ci
+
+      # Fails the build on any TypeScript error (tsconfig sets "noEmit").
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The Vitest suite targets only the pure lib (no browser, no Three.js),
+      # so it runs headless in CI with no extra setup.
+      - name: Unit tests
+        run: npm run test -- --run
